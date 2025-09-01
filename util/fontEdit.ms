@@ -8,6 +8,53 @@ import "qa"
 env.importPaths = [".", "/usr", "/usr/lib", "/sys/lib"]
 import "bmfFonts"
 
+// Factory: build a new, empty font ready to save & edit
+bmfFonts.Font.initEmpty = function(title, glyphW, glyphH, charset=null, version=1.2)
+  f = new bmfFonts.Font
+
+  // --- Required header/meta ---
+  f.version   = version        // 1.2 recommended
+  f.title     = title
+  f.lineHeight = glyphH
+  // Reasonable defaults; tweak to taste or expose in UI:
+  f.sizeOver   = -ceil(glyphH * 0.20)   // ascender above baseline
+  f.sizeUnder  =  ceil(glyphH * 0.25)   // descender below baseline
+  f.addSpace   = 0
+  f.sizeInner  = 0
+
+  // --- Color/alpha model ---
+  // With v1.2 + alphaBits=8, CharData stores alpha per pixel, and drawing
+  // uses palette[0] as the base RGB (your module composes it with alpha).
+  f.alphaBits    = 8
+  f.numPalettes  = 0        // NOTE: your loader does (+1) when reading.
+                            // Writing 0 means "1 palette" on disk.
+  f.palette      = [ color.white ]  // base RGB; alpha supplied per pixel
+  f.usedColors       = f.palette.len
+  f.highestUsedColor = f.palette.len
+
+  // --- Glyph set ---
+  f.chars   = {}
+  f.kernMap = {}  // start empty
+
+  // Default charset: printable ASCII
+  if charset == null then
+    charset = []
+    for code in range(32, 126)
+      charset.push char(code)
+    end for
+  end if
+
+  // Seed blank images for each character
+  for c in charset
+    img = Image.create(glyphW, glyphH, color.clear)  // fully transparent
+    // shift defaults to glyphW; relX/relY defaults to 0
+    f.addChar c, img, 0, 0, glyphW
+  end for
+
+  return f
+end function
+
+
 // Constants and global state variables
 kModeDraw = "DRAW"
 kModeErase = "ERASE"
@@ -137,6 +184,10 @@ y = uiImg.height - 16
 for item in "base under over curs shift".split
 	uiSprite[item] = new Sprite
 	uiSprite[item].image = uiImg.getImage(0, y, uiImg.width, 16)
+	uiSprite[item].localBounds = new Bounds
+	uiSprite[item].localBounds.width = uiImg.width
+	uiSprite[item].localBounds.height = uiImg.height
+	if item == "curs" or item == "base" then uiSprite[item].tint = color.gray
 	if item == "curs" or item == "shift" then uiSprite[item].rotation = 90
 	y = y - 16
 	spriteDisp.sprites.push uiSprite[item]
@@ -161,7 +212,7 @@ updateMetricSprites = function
 	pp.y = charData.height + charData.relY + font.sizeOver - 0.5
 	uiSprite.base.x = xAtPaintPixel(pp) - 20
 	uiSprite.base.y = yAtPaintPixel(pp)
-		
+	
 	pp.y = charData.height + charData.relY - 0.5
 	uiSprite.over.x = uiSprite.base.x
 	uiSprite.over.y = yAtPaintPixel(pp) + 8
@@ -172,13 +223,80 @@ updateMetricSprites = function
 	
 	pp.y -= 1
 	pp.x = -charData.relX - 0.5
-	uiSprite.curs.x = xAtPaintPixel(pp) - 8
+	uiSprite.curs.x = xAtPaintPixel(pp)
 	uiSprite.curs.y = yAtPaintPixel(pp) - 20
 	
 	pp.x = -charData.relX + charData.shift
-	uiSprite.shift.x = xAtPaintPixel(pp) + 8
+	uiSprite.shift.x = xAtPaintPixel(pp) + 12
 	uiSprite.shift.y = yAtPaintPixel(pp) - 20	
-	
+end function
+
+// =======================
+// Metric spinners: create + sync
+// =======================
+metricSpinners = {}       // map of name -> Spinner
+metricAnchorX = 788       // adjust to fit your layout
+metricAnchorY = 180
+metricVGap   = 38
+metricHGap 	= 6
+
+buildMetricSpinners = function
+  // Clear prior drawings in that column (simple wipe)
+  //gfx.fillRect metricAnchorX-8, metricAnchorY-8, 160, metricVGap*6, color.clear
+
+  font = selectedTab.font
+  cd   = font.charData(selectedTab.curChar)
+  if cd == null then return
+
+  // Recompute clamps based on current glyph size
+  w = mathUtil.max(1, cd.width)
+  h = mathUtil.max(1, cd.height)
+
+  // Helper functions for get/set so spinners read/write the model
+  // 1) sizeOver (typically <= 0)
+  getSO = function; return font.sizeOver; end function
+  setSO = function(v); font.sizeOver = v; updateMetricSprites; end function
+
+  // 2) sizeUnder (>= 0)
+  getSU = function; return font.sizeUnder; end function
+  setSU = function(v); font.sizeUnder = v; updateMetricSprites; end function
+
+  // 3) relY (per glyph)
+  getRelY = function; return cd.relY; end function
+  setRelY = function(v); cd.relY = v; updateMetricSprites; end function
+
+  // 4) relX (per glyph)
+  getRelX = function; return cd.relX; end function
+  setRelX = function(v); cd.relX = v; updateMetricSprites; end function
+
+  // 5) shift (advance)
+  getShift = function; return cd.shift; end function
+  setShift = function(v); cd.shift = v; updateMetricSprites; end function
+
+  // (Re)create or update spinners
+  y = metricAnchorY + metricVGap*4
+  metricSpinners["over"] = Spinner.make("Over", metricAnchorX, y, -h, 1, 1, @getSO, @setSO); metricSpinners["relY"] = Spinner.make("relY", metricAnchorX + Spinner.width + metricHGap, y, -h, h, 1, @getRelY, @setRelY); y = y - metricVGap
+  metricSpinners["under"] = Spinner.make("Under", metricAnchorX, y, 1, h, 1, @getSU, @setSU); metricSpinners["relX"] = Spinner.make("relX", metricAnchorX + Spinner.width + metricHGap, y, -w, w, 1, @getRelX, @setRelX); y = y - metricVGap
+  metricSpinners["shift"] = Spinner.make("shift", metricAnchorX + (Spinner.width + metricHGap) /2, y, 0, w*2, 1, @getShift, @setShift)
+
+  // Initial draw
+  for s in metricSpinners.values; s.draw; end for
+end function
+
+syncMetricSpinners = function
+  if metricSpinners == null or metricSpinners.len == 0 then return
+  font = selectedTab.font
+  cd   = font.charData(selectedTab.curChar)
+  if cd == null then return
+  w = max(1, cd.width); h = max(1, cd.height)
+
+  // Update clamps and values, then redraw
+  ms = metricSpinners
+  ms["over"].minVal = -h; ms["over"].maxVal = 0;      ms["over"].syncFromModel
+  ms["under"].minVal = 0;  ms["under"].maxVal = h;     ms["under"].syncFromModel
+  ms["relY"].minVal = -h;  ms["relY"].maxVal = h;      ms["relY"].syncFromModel
+  ms["relX"].minVal = -w;  ms["relX"].maxVal = w;      ms["relX"].syncFromModel
+  ms["shift"].minVal = 0;  ms["shift"].maxVal = w*2;   ms["shift"].syncFromModel
 end function
 
 //---------------------------------------------------------------------
@@ -259,9 +377,9 @@ Button.toggles = false
 Button.isDown = false	// (for toggle buttons, which can be up or down)
 Button.init = function(imageName, left, top)
 	self.bgSprite = new Sprite
-	self.bgSprite.image = Tool.btnUpImg
-	self.bgSprite.x = left + Tool.btnUpImg.width/2
-	self.bgSprite.y = 640 - top - Tool.btnUpImg.height/2
+	self.bgSprite.image = Button.btnUpImg
+	self.bgSprite.x = left + Button.btnUpImg.width/2
+	self.bgSprite.y = 640 - top - Button.btnUpImg.height/2
 	spriteDisp.sprites.push self.bgSprite
 	
 	self.iconSprite = new Sprite
@@ -277,15 +395,15 @@ end function
 
 Button.update = function(pressed=false)
 	if pressed then
-		self.bgSprite.image = Tool.btnDownImg
+		self.bgSprite.image = Button.btnDownImg
 		self.bgSprite.tint = "#666666"
 		self.iconSprite.tint = color.white
 	else if self.isDown then
-		self.bgSprite.image = Tool.btnDownImg
+		self.bgSprite.image = Button.btnDownImg
 		self.bgSprite.tint = color.white
 		self.iconSprite.tint = color.white
 	else
-		self.bgSprite.image = Tool.btnUpImg
+		self.bgSprite.image = Button.btnUpImg
 		self.bgSprite.tint = color.white
 		self.iconSprite.tint = "#CCCCCCCC"
 	end if
@@ -425,6 +543,171 @@ scaleSlider.applyValue = function(value)
 end function
 scaleSlider.snap
 scaleSlider.applyValue
+
+// =======================
+// Spinner Control
+// =======================
+Spinner = {}
+Spinner.instances = []
+
+// Visual metrics for one spinner
+Spinner.width = 80
+Spinner.height = 34
+Spinner.btnW = 18
+Spinner.btnH = 14
+Spinner.pad = 4
+Spinner.fontColor = "#DDDDDD"
+Spinner.bgColor = "#3A3A3A"
+Spinner.frameColor = "#000000"
+Spinner.hotColor = "#55AAFF"
+Spinner.valueColor = "#FFFFFF"
+Spinner.labelColor = "#CCCCCC"
+
+// Build one spinner at (left,bottom)
+Spinner.init = function(label, left, bottom, minVal, maxVal, step, getFn, setFn)
+  self.label = label
+  self.left = left
+  self.bottom = bottom
+  self.minVal = minVal
+  self.maxVal = maxVal
+  self.step = step
+  self.getFn = @getFn      // () -> number     (read from model)
+  self.setFn = @setFn      // (v) -> void      (write to model)
+  self.value = self.getFn()
+
+  // Rectangles for hit-testing (use your Rect class)
+  self.bounds  = Rect.make(left, bottom, Spinner.width, Spinner.height)
+  self.upBtn   = Rect.make(left + Spinner.width - Spinner.pad - Spinner.btnW,
+                           bottom + Spinner.height - Spinner.pad - Spinner.btnH,
+                           Spinner.btnW, Spinner.btnH)
+  self.downBtn = Rect.make(self.upBtn.left,
+                           bottom + Spinner.pad,
+                           Spinner.btnW, Spinner.btnH)
+  // Text anchor points (for gfx.print)
+  self.labelX = left + Spinner.pad
+  self.labelY = bottom + Spinner.height - 16
+  self.valueX = left + Spinner.pad
+  self.valueY = bottom + 2
+
+  // Auto-repeat bookkeeping
+  self._pressing = false
+  self._dir = 0
+  self._nextRepeat = 0
+  self._firstDelay = 0.32
+  self._repeatRate = 0.06
+
+  Spinner.instances.push self
+end function
+
+Spinner.make = function(label, left, bottom, minVal, maxVal, step, getFn, setFn)
+  s = new Spinner
+  s.init label, left, bottom, minVal, maxVal, step, @getFn, @setFn
+  return s
+end function
+
+Spinner._stepWithModifiers = function(baseStep)
+  mult = 1
+  if key.pressed("left alt") or key.pressed("right alt")   then mult = 1
+  if key.pressed("left shift") or key.pressed("right shift") then mult = 5
+  if key.pressed("left ctrl") or key.pressed("right ctrl") then mult = 10
+  return baseStep * mult
+end function
+
+Spinner._clamp = function(v)
+  return mathUtil.clamp(v, self.minVal, self.maxVal)
+end function
+
+Spinner.setValue = function(v, redraw=true)
+  v = self._clamp(v)
+  if v == self.value then return
+  self.value = v
+  self.setFn v
+  if redraw then
+    // Minimal repaint of our value area
+    // Clear value rect region and reprint
+    gfx.fillRect self.valueX-2, self.valueY-2, 76, 16, color.clear
+    gfx.print str(v), self.valueX, self.valueY, Spinner.valueColor, "small"
+  end if
+end function
+
+Spinner.syncFromModel = function(redraw=true)
+  self.value = self._clamp(self.getFn())
+  if redraw then self.draw
+end function
+
+Spinner.draw = function(hoverPos=null)
+  // panel
+  self.bounds.fill gfx, Spinner.bgColor
+  self.bounds.frame gfx, Spinner.frameColor, 2
+
+  // label
+  gfx.print self.label, self.labelX, self.labelY, Spinner.labelColor, "small"
+
+  // value
+  gfx.print str(self.value), self.valueX, self.valueY, Spinner.valueColor, "small"
+
+  // buttons
+  upColor = Spinner.fontColor
+  dnColor = Spinner.fontColor
+  if hoverPos != null then
+    if self.upBtn.contains(hoverPos) then upColor = Spinner.hotColor
+    if self.downBtn.contains(hoverPos) then dnColor = Spinner.hotColor
+  end if
+  self.upBtn.frame gfx, upColor
+  self.downBtn.frame gfx, dnColor
+
+  // draw simple ▲ / ▼ with lines
+  // up triangle
+  ux = self.upBtn.left + floor(self.upBtn.width/2)
+  uy = self.upBtn.bottom + 3
+  gfx.line ux-5, uy+3, ux, uy+9, upColor
+  gfx.line ux+5, uy+3, ux, uy+9, upColor
+  // down triangle
+  dx = self.downBtn.left + floor(self.downBtn.width/2)
+  dy = self.downBtn.bottom + self.downBtn.height - 3
+  gfx.line dx-5, dy-3, dx, dy-9, dnColor
+  gfx.line dx+5, dy-3, dx, dy-9, dnColor
+end function
+
+Spinner._applyNudge = function(dir)
+  // dir = +1 for up, -1 for down
+  delta = self._stepWithModifiers(self.step) * dir
+	print dir
+  self.setValue self.value + delta
+  updateMetricSprites     // reflect immediately
+  // (Optional) if you track dirty state on tabs:
+  if selectedTab.hasIndex("dirty") then selectedTab.dirty = true
+end function
+
+Spinner.checkEvents = function
+  // Hover feedback & redraw only if mouse is over our region
+  if self.bounds.contains(mouse) then
+    self.draw mouse
+  end if
+
+  // Click (or press-and-hold) handling on our up/down buttons
+  if mouse.button and not self._pressing then
+    if self.upBtn.contains(mouse) then
+      self._pressing = true; self._dir = 1
+      self._applyNudge 1
+      self._nextRepeat = time + self._firstDelay
+    else if self.downBtn.contains(mouse) then
+      self._pressing = true; self._dir = -1
+      self._applyNudge -1
+      self._nextRepeat = time + self._firstDelay
+    end if
+  end if
+
+  if self._pressing then
+    if not mouse.button then
+      self._pressing = false
+    else if time >= self._nextRepeat then
+      self._applyNudge self._dir
+      self._nextRepeat = time + self._repeatRate
+    end if
+  end if
+end function
+
 	
 //---------------------------------------------------------------------
 // Tools
@@ -459,8 +742,9 @@ Tool.checkEvents = function
 			setMode self.mode
 		end if
 	else if Tool.optKeySwitchedFrom == self.mode then
+		// Restore tool back from Eye Dropper
+		setMode Tool.optKeySwitchedFrom
 		Tool.optKeySwitchedFrom = null
-		setMode self.mode
 	end if
 	
 	super.checkEvents
@@ -531,7 +815,7 @@ drawGrid = function
 	end for
 	// Draw bounding box of fatbits area
 	backdropRect.frame(gfx, spriteBoundsColor)
-end  function
+end function
 
 makeTools = function
 	tools = [
@@ -547,8 +831,8 @@ makeTools = function
 end function
 makeTools
 
-vSymmetry = Button.make("modeSymmetry", 818, 304, true)
-hSymmetry = Button.make("modeSymmetry", 880, 304, true)
+vSymmetry = Button.make("modeSymmetry", 818, 224, true)
+hSymmetry = Button.make("modeSymmetry", 880, 224, true)
 hSymmetry.iconSprite.rotation = 90
 
 // Find the painting location at the given screen location.
@@ -1005,29 +1289,39 @@ setupUI.draw = function
 		loadBtn.x = 34+4; loadBtn.y = 18
 		loadBtn.nextState = kLoadFile
 		self.buttons.push loadBtn
+
+	// NEW FILE
 	else if self.state == kNewFile then
 		textUtil.printCenteredAt 34, 21, "Create New Font"
 		textUtil.printAt 10, 18, "Current Directory: " + pwd
+
 		self.path = self.inputAt(10, 16, "New file path: ")
+		if self.path[-4:] != ".bmf" then self.path = self.path + ".bmf"
+
 		self.width = 0
 		while not self.width
-			self.width = self.inputAt(10, 14, "New glyph width:  ").val
+			self.width = self.inputAt(10, 14, "New glyph width: ").val
 		end while
 		self.height = 0
 		while not self.height
 			self.height = self.inputAt(10, 13, "New glyph height: ").val
 		end while
-		self.img = Image.create(self.width, self.height, color.clear)
-		if self.path[-4:] != ".bmf" then self.path = self.path + ".bmf"
-		err = "Creating font files not implemented yet" // file.saveImage(self.path, self.img)
+
+		// Create an empty font instance using our factory
+		newFont = bmfFonts.Font.initEmpty(file.name(self.path) - ".bmf", self.width, self.height)
+
+		// Save an (empty) file to disk now so the path is real
+		err = newFont.save(self.path)
 		if err then
 			textUtil.Dialog.make("Unable to Save File", err).show
 			self.state = kStart
 			self.draw
 		else
-			addTabForFont self.font, self.path
+			addTabForFont newFont, self.path
 			self.state = kDone
 		end if
+
+	// LOAD FILE	
 	else if self.state == kLoadFile then
 		textUtil.printCenteredAt 34, 21, "Load Font"
 		textUtil.printAt 10, 18, "Current Directory: " + pwd
@@ -1101,6 +1395,7 @@ drawTab = function(x, width, title="", isSelected=false)
 		gfx.print title, x + width/2 - titleWidth/2 + 8, y + h/2 - 5, c, "small"
 	end if
 end function
+
 OpenFile = {}
 OpenFile.path = ""
 OpenFile.tabX = null
@@ -1109,10 +1404,14 @@ OpenFile.tabWidth = 0
 OpenFile.tabTitle = ""
 OpenFile.srcRect = null
 OpenFile.closeBtn = null
+OpenFile.dirty = false
+
 OpenFile.saveFromEditArea = function
 	self.image = fatbits.getImage(0, 0, picW, picH)
 	selectedTab.font.charData(selectedTab.curChar).image = self.image
+	self.dirty = true
 end function
+
 OpenFile.loadToEditArea = function
 	globals.picW = self.image.width; globals.picH = self.image.height
 	fatbits.clear color.clear, picW, picH
@@ -1121,11 +1420,13 @@ OpenFile.loadToEditArea = function
 	updatePaintScroll
 	updateMetricSprites
 end function
+
 OpenFile.saveToDisk = function
 	if self == selectedTab then self.saveFromEditArea
 
 	err = self.font.save(self.path)
 	if not err then
+		self.dirty = false
 		dlog = textUtil.Dialog.make("Saved """ + file.name(self.path) + """",
 		   self.path + char(13) + self.font.chars.len + " characters")
 		dlog.okBtn.visible = false
@@ -1135,6 +1436,7 @@ OpenFile.saveToDisk = function
 		dlog.show
 	end if
 end function
+
 OpenFile.close = function
 	tabIdx = tabs.indexOf(self)
 	// Choose the tab before it, or the first one if none left
@@ -1206,7 +1508,7 @@ end function
 updateTabs = function
 	for t in tabs
 		if t.closeBtn == null then continue
-		t.closeBtn.update false, t == selectedTab, false
+		t.closeBtn.update t.dirty, t == selectedTab, false
 	end for
 end function
 
@@ -1240,6 +1542,7 @@ refreshDrawPanel = function(tab)
 	previewArea.prepare tab.image
 	prepareScreen
 	tab.loadToEditArea
+	buildMetricSpinners
 end function
 
 switchToTab = function(tab)
@@ -1260,6 +1563,7 @@ changeEditCharacter = function(character)
 		selectedTab.image = Image.create(1, 1, color.clear) // For invalid characters that don't have any charData, handle this better or something?
 	end if
 	refreshDrawPanel selectedTab
+	syncMetricSpinners
 end function
 
 addTabForFont = function(font, path)
@@ -1647,6 +1951,7 @@ while true
 	for btn in Button.instances; btn.checkEvents; end for
 	for s in Swatch.instances; s.checkEvents; end for
 	for s in Slider.instances; s.checkEvents; end for
+	for sp in Spinner.instances; sp.checkEvents; end for   // <— Update Spinners
 	PalButton.checkEventsForAll
 	colorWheel.checkEvents
 	glyphList.checkEvents
