@@ -67,3 +67,62 @@ This repo includes a `util` folder with a couple of utility programs.  These are
 - **unpack.ms**: simple utility to unpack a BMF file into a folder full of files, one image per glyph, plus a text file (in GRFON format) describing the font metrics etc.
 - **pack.ms**: performs the reverse operation, taking a folder full of files as produced by _unpack_, and generating a .bmf font file.
 - **fontEdit.ms**: a _work in progress_ font editor.  Not really usable yet; see GitHub issues (and coming soon, bounties!) for further development of this tool.
+- **fontFromImage.ms**: create a monospace font by extracting characters from a grid-based sprite sheet image.
+- **gridFontDemo.ms**: demonstration of the grid-based font loading and saving features (see below).
+
+## Grid-Based Font Loading
+
+You can easily load monospace fonts from grid-based sprite sheet images, which are common in retro games and easy for artists to create. Use `Font.loadFromGrid` to extract characters from a regular grid:
+
+```
+import "bmfFonts"
+
+// Load a font from a grid image
+// Characters are extracted left-to-right, top-to-bottom
+f = bmfFonts.Font.loadFromGrid(
+    "mygrid.png",    // Path to sprite sheet image
+    8,               // Cell width in pixels
+    8,               // Cell height in pixels
+    "32-126",        // Character mapping (ASCII 32-126)
+    2                // Baseline (pixels from bottom of cell)
+)
+
+// You can also specify margins and spacing
+f = bmfFonts.Font.loadFromGrid(
+    "mygrid.png", 
+    8, 8, 
+    "0-255",         // All 256 characters
+    1,               // Baseline
+    0,               // Left margin
+    0,               // Top margin
+    0,               // Horizontal spacing between cells
+    0                // Vertical spacing between cells
+)
+```
+
+### Character Mapping
+
+The character mapping parameter can be either:
+- A **string** with flexible syntax: `"32-95"`, `"A-Z,a-z,0-9"`, `"32-126,skip 10,160-180"`
+  - Ranges: `"65-90"` expands to all characters from 65 to 90
+  - Individual values: `"65,66,67"` 
+  - Skip cells: `"skip"` (skip 1 cell) or `"skip 5"` (skip 5 cells)
+  - Combined: `"32-126,skip 3,160-255"`
+- A **list** of integer code points: `[65, 66, 67, 68]` or `range(32, 126)`
+
+### Saving Fonts as Grids
+
+You can also save any monospace font back to a grid-based sprite sheet:
+
+```
+// Save font as grid image (16 columns)
+f.saveAsGrid "output.png", 16
+
+// This creates:
+//   output.png  - the grid sprite sheet
+//   output.txt  - metadata file with reload instructions
+```
+
+The metadata file includes all parameters needed to reload the font using `loadFromGrid`.
+
+For more examples, see `util/gridFontDemo.ms`.

@@ -39,6 +39,54 @@ end function
 hexStrToInt = {}
 for i in range(0,255); hexStrToInt[hex2(i)] = i; end for
 
+// parseCharString: Helper function to parse character mapping strings.
+// Converts strings like "32-95", "0-127", "17-21,27,32-127,skip 3,139,skip,217-220"
+// into a list of integer code points (with null for skip entries).
+// Examples:
+//   parseCharString("32-35") -> [32, 33, 34, 35]
+//   parseCharString("65,66,skip,68") -> [65, 66, null, 68]
+//   parseCharString("32-35,skip 2,40") -> [32, 33, 34, 35, null, null, 40]
+parseCharString = function(s)
+	if not s then return []
+	result = []
+	parts = s.split(",")
+	for part in parts
+		part = part.trim
+		if not part then continue
+		
+		// Handle "skip" or "skip N"
+		if part.lower.indexOf("skip") == 0 then
+			rest = part[4:].trim
+			if rest == "" then
+				result.push null
+			else
+				skipCount = val(rest)
+				for i in range(1, skipCount)
+					result.push null
+				end for
+			end if
+			continue
+		end if
+		
+		// Handle range "N-M"
+		if part.indexOf("-") != null then
+			rangeParts = part.split("-")
+			if rangeParts.len == 2 then
+				startVal = val(rangeParts[0].trim)
+				endVal = val(rangeParts[1].trim)
+				for i in range(startVal, endVal)
+					result.push i
+				end for
+				continue
+			end if
+		end if
+		
+		// Handle single number
+		result.push val(part)
+	end for
+	return result
+end function
+
 // Find the colors array from our image and the given palette map,
 // which maps each usable color to an index (1 to number of colors).
 // Note that an index of 0 always means "don't draw" (transparent).
@@ -789,6 +837,129 @@ Font.loadYAFF = function(path)
 	return f
 end function
 
+// Font.loadFromGrid: Load a monospace font from a regular grid-based image.
+// Such images are common in retro games and are easy for artists to create.
+// Parameters:
+//   imagePath: Path to the sprite sheet image
+//   cellWidth, cellHeight: Size of each character cell in pixels
+//   charMapping: Either a string (e.g., "32-95", "0-127", "A-Z,a-z,skip 3,48-57")
+//                or a list of integer code points
+//   baseline: Distance from bottom of cell to baseline (in pixels)
+//   leftMargin, topMargin: Offset to first cell (default 0)
+//   horizontalSpacing: Extra horizontal space between cells/chars (default 0)
+//   verticalSpacing: Extra vertical space between rows (default 0)
+Font.loadFromGrid = function(imagePath, cellWidth, cellHeight, charMapping, baseline, leftMargin=0, topMargin=0, horizontalSpacing=0, verticalSpacing=0)
+	// Load the image
+	image = file.loadImage(imagePath)
+	if image == null then
+		print "Font.loadFromGrid: Unable to load image at " + imagePath
+		return null
+	end if
+	
+	// Parse character mapping
+	charList = null
+	if charMapping isa string then
+		charList = parseCharString(charMapping)
+	else if charMapping isa list then
+		charList = charMapping
+	else
+		print "Font.loadFromGrid: charMapping must be a string or list"
+		return null
+	end if
+	
+	// Calculate grid dimensions
+	effectiveCellWidth = cellWidth + horizontalSpacing
+	effectiveCellHeight = cellHeight + verticalSpacing
+	availWidth = image.width - leftMargin
+	availHeight = image.height - topMargin
+	cols = floor(availWidth / effectiveCellWidth)
+	rows = floor(availHeight / effectiveCellHeight)
+	
+	// Create new Font object
+	f = new Font
+	f.version = 1.2
+	f.chars = {}
+	f.lineHeight = cellHeight
+	f.sizeOver = -cellHeight
+	f.sizeUnder = baseline
+	f.addSpace = horizontalSpacing
+	f.sizeInner = 0
+	f.alphaBits = 0
+	f.numPalettes = 0
+	f.kernMap = null
+	
+	// Extract characters from grid
+	charIdx = 0
+	for row in range(0, rows-1)
+		if charIdx >= charList.len then break
+		// Calculate y position (bottom-left coordinate system)
+		y = image.height - topMargin - (row+1) * cellHeight - row * verticalSpacing
+		
+		for col in range(0, cols-1)
+			if charIdx >= charList.len then break
+			
+			// Get character code (skip if null)
+			charCode = charList[charIdx]
+			charIdx = charIdx + 1
+			if charCode == null then continue
+			
+			// Calculate x position
+			x = leftMargin + col * effectiveCellWidth
+			
+			// Extract cell image
+			img = image.getImage(x, y, cellWidth, cellHeight)
+			
+			// Create CharData
+			cd = new CharData
+			cd.charCode = charCode
+			cd.width = cellWidth
+			cd.height = cellHeight
+			cd.relX = 0
+			cd.relY = 0
+			cd.shift = cellWidth
+			cd.image = img
+			
+			// Add to font
+			f.chars[char(charCode)] = cd
+		end for
+	end for
+	
+	// Auto-detect palette from all character images
+	paletteColors = {}
+	for cd in f.chars.values
+		if cd.image == null then continue
+		for y in range(cd.height - 1)
+			for x in range(0, cd.width - 1)
+				c = cd.image.pixel(x, y)
+				alpha = c[-2:]
+				if alpha != "00" then  // Not transparent
+					c = c[:-2]  // Strip alpha
+					if not paletteColors.hasIndex(c) then
+						paletteColors[c] = paletteColors.len + 1
+					end if
+				end if
+			end for
+		end for
+	end for
+	
+	// Build palette array
+	f.palette = []
+	for c in paletteColors.indexes.sort
+		f.palette.push c
+	end for
+	if f.palette.len == 0 then f.palette = ["#FFFFFF"]  // Default
+	
+	f.usedColors = f.palette.len
+	f.highestUsedColor = f.palette.len
+	
+	// Convert all images to colors arrays
+	for cd in f.chars.values
+		cd.findColorsFromImage paletteColors, f.alphaBits
+	end for
+	
+	return f
+end function
+
 Font.loadBMF = function(path)
 	data = file.loadRaw(path)
 	if data == null then return null
@@ -866,6 +1037,152 @@ Font.loadBMF = function(path)
 		end for
 	end if
 	return f
+end function
+
+// Font.imageAsGrid: Create a grid image from the font's characters.
+// Returns a map containing:
+//   image: The grid image
+//   charString: Character mapping string (auto-detects ranges)
+//   cellWidth, cellHeight: Cell dimensions
+//   baseline: Pixels from bottom of cell to baseline
+//   columns: Number of columns in grid
+Font.imageAsGrid = function(columns=16)
+	// Get sorted list of character codes
+	charCodes = []
+	for c in self.chars.indexes
+		charCodes.push code(c)
+	end for
+	charCodes.sort
+	
+	if charCodes.len == 0 then
+		print "Font.imageAsGrid: No characters in font"
+		return null
+	end if
+	
+	// Determine cell size
+	cellWidth = self.lineHeight
+	cellHeight = self.lineHeight
+	for c in self.chars.values
+		if c.width > cellWidth then cellWidth = c.width
+	end for
+	
+	// Calculate grid dimensions
+	rows = ceil(charCodes.len / columns)
+	imageWidth = cellWidth * columns
+	imageHeight = cellHeight * rows
+	
+	// Create blank image
+	img = Image.create(imageWidth, imageHeight, color.clear)
+	
+	// Render each character to grid
+	for i in range(0, charCodes.len - 1)
+		charCode = charCodes[i]
+		c = char(charCode)
+		cd = self.chars[c]
+		
+		// Calculate grid position
+		row = floor(i / columns)
+		col = i % columns
+		x = col * cellWidth
+		y = imageHeight - (row + 1) * cellHeight
+		
+		// Render character centered in cell
+		charImg = self.getCharImage(c)
+		if charImg != null then
+			// Center character in cell
+			xOffset = floor((cellWidth - cd.width) / 2)
+			yOffset = 0  // Bottom-aligned for monospace
+			for cy in range(charImg.height - 1)
+				for cx in range(0, charImg.width - 1)
+					pixel = charImg.pixel(cx, cy)
+					if pixel[-2:] != "00" then  // Not transparent
+						img.setPixel x + xOffset + cx, y + yOffset + cy, pixel
+					end if
+				end for
+			end for
+		end if
+	end for
+	
+	// Generate character mapping string with auto-detected ranges
+	charString = ""
+	i = 0
+	while i < charCodes.len
+		startCode = charCodes[i]
+		endCode = startCode
+		
+		// Find consecutive sequence
+		while i + 1 < charCodes.len and charCodes[i + 1] == endCode + 1
+			i = i + 1
+			endCode = charCodes[i]
+		end while
+		
+		// Add to string
+		if charString then charString = charString + ","
+		if startCode == endCode then
+			charString = charString + startCode
+		else if endCode == startCode + 1 then
+			// Two consecutive: write as separate values
+			charString = charString + startCode + "," + endCode
+		else
+			// Range of 3 or more: use range notation
+			charString = charString + startCode + "-" + endCode
+		end if
+		
+		i = i + 1
+	end while
+	
+	return {
+		"image": img,
+		"charString": charString,
+		"cellWidth": cellWidth,
+		"cellHeight": cellHeight,
+		"baseline": self.sizeUnder,
+		"columns": columns
+	}
+end function
+
+// Font.saveAsGrid: Save the font as a grid-based sprite sheet image.
+// Also saves metadata to a companion .txt file.
+// Parameters:
+//   path: Path to save the image (e.g., "font.png")
+//   columns: Number of columns in grid (default 16)
+Font.saveAsGrid = function(path, columns=16)
+	// Generate grid image and metadata
+	gridData = self.imageAsGrid(columns)
+	if gridData == null then return
+	
+	// Save the image
+	gridData.image.save path
+	print "Saved grid image to " + path
+	
+	// Create metadata file path (replace extension with .txt)
+	metaPath = path
+	lastDot = metaPath.lastIndexOf(".")
+	if lastDot != null then
+		metaPath = metaPath[:lastDot] + ".txt"
+	else
+		metaPath = metaPath + ".txt"
+	end if
+	
+	// Write metadata in GRFON-like format
+	lines = []
+	lines.push "// Grid Font Metadata"
+	lines.push "// Generated by bmfFonts.saveAsGrid"
+	lines.push ""
+	lines.push "cellWidth: " + gridData.cellWidth
+	lines.push "cellHeight: " + gridData.cellHeight
+	lines.push "baseline: " + gridData.baseline
+	lines.push "columns: " + gridData.columns
+	lines.push "chars: """ + gridData.charString + """"
+	lines.push ""
+	lines.push "// To reload this font:"
+	q = char(34)  // quote character
+	lines.push "// f = Font.loadFromGrid(" + q + path.split("/")[-1] + q + ", " + 
+	  gridData.cellWidth + ", " + gridData.cellHeight + ", " + q + 
+	  gridData.charString + q + ", " + gridData.baseline + ")"
+	
+	file.writeLines metaPath, lines
+	print "Saved metadata to " + metaPath
 end function
 
 Font.save = function(path)
@@ -1162,7 +1479,7 @@ Font.saveBMF = function(path)
 	if not self.hasIndex("usedColors") then self.usedColors = self.palette.len
 	if not self.hasIndex("highestUsedColor") then self.highestUsedColor = self.palette.len
 	
-//	print "Saving version " +self.version + " file with " + highCharCount + " high chars"
+	//	print "Saving version " +self.version + " file with " + highCharCount + " high chars"
 	
 	paletteMap = {}  // key: color (sans alpha); value: color index + 1
 	for i in self.palette.indexes
